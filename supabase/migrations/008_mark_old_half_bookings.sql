@@ -7,7 +7,7 @@
 select b.day,
        f.name as team,
        b.note,
-       case when b.note ~* '(half|halb|hälfte|demi|1/2|½)' then 'YES → half' else 'no' end as becomes_half
+       case when b.note ~* '(half|halb|hälfte|demi|1/2|½|nur 2 pl)' then 'YES → half' else 'no' end as becomes_half
 from public.bookings b join public.families f on f.id = b.family_id
 where f.name ilike '%inserli%' and b.note is not null
 order by b.day;
@@ -15,4 +15,4 @@ order by b.day;
 -- STEP B: only once the list in step A is right. Remove the "-- " at the
 -- start of the two lines below, select ONLY those two lines, and click Run.
 -- update public.bookings set half = true
--- where note ~* '(half|halb|hälfte|demi|1/2|½)' and family_id in (select id from public.families where name ilike '%inserli%');
+-- where note ~* '(half|halb|hälfte|demi|1/2|½|nur 2 pl)' and family_id in (select id from public.families where name ilike '%inserli%');
