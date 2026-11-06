@@ -12,7 +12,7 @@ export type Family = {
   notify_email: boolean; lang: 'en' | 'de'; activity_seen_at: string;
 };
 export type TeamEmail = { email: string; family_id: number };
-export type Booking = { day: string; family_id: number; note: string | null };
+export type Booking = { day: string; family_id: number; note: string | null; half: boolean };
 export type Activity = { id: number; family_id: number; action: 'booked' | 'removed' | 'note'; day_from: string; day_to: string; created_at: string; notified_at: string | null; note?: string | null };
 
 export const COLORS = ['#1F4FD1', '#0E8A5A', '#E0870B', '#7A3FD6', '#C2185B', '#0F8C9E', '#6D4C2F', '#4A5568'];
@@ -49,7 +49,7 @@ export async function loadBookings() {
   // Supabase returns at most 1000 rows per request, so page through them.
   const all: Booking[] = [];
   for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase.from('bookings').select('day, family_id, note').order('day').range(from, from + 999);
+    const { data, error } = await supabase.from('bookings').select('day, family_id, note, half').order('day').range(from, from + 999);
     if (error) throw error;
     all.push(...(data as Booking[]));
     if (data.length < 1000) return all;
@@ -62,12 +62,14 @@ export async function loadActivity() {
   return data as Activity[];
 }
 
-export type ToggleResult = { status: 'ok'; action: 'booked' | 'removed'; activity_id: number } | { status: 'taken'; family_id: number };
+// 'full' = whole apartment, 'half' = half the apartment (two families can share a day).
+export type DayState = 'full' | 'half' | 'free';
+export type SetDayResult = { status: 'ok'; action: 'booked' | 'removed' | 'changed' | 'none' } | { status: 'taken'; family_id: number };
 
-export async function toggleDay(day: string) {
-  const { data, error } = await supabase.rpc('toggle_day', { p_day: day });
+export async function setDay(day: string, state: DayState) {
+  const { data, error } = await supabase.rpc('set_day', { p_day: day, p_state: state });
   if (error) throw error;
-  return data as ToggleResult;
+  return data as SetDayResult;
 }
 
 // Write (or clear, with '') the note on one of my booked days.

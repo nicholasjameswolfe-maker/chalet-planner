@@ -26,6 +26,8 @@ function loadUi(): Ui {
 const isLeap = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
 const dim = (y: number, m: number) => new Date(y, m + 1, 0).getDate();
 const isWE = (y: number, m: number, d: number) => { const w = new Date(y, m, d).getDay(); return w === 0 || w === 6; };
+// A box cut diagonally: top-left half in the family colour = half the apartment.
+const halfBg = (c: string, rest: string) => `linear-gradient(135deg, ${c} 0 50%, ${rest} 50% 100%)`;
 
 export default function App() {
   const [ui, setUi] = useState<Ui>(loadUi);
@@ -46,8 +48,9 @@ export default function App() {
 
   // ── Shared data (live) ──
   const [families, setFamilies] = useState<Family[] | null>(null);
-  const [bookings, setBookings] = useState<Record<string, number>>({});
-  const [notes, setNotes] = useState<Record<string, string>>({}); // day → note, e.g. "arriving at 19h"
+  // day → { familyId: half? }. Whole apartment = one family (false); half = up to two families (true).
+  const [bookings, setBookings] = useState<Record<string, Record<number, boolean>>>({});
+  const [notes, setNotes] = useState<Record<string, string>>({}); // "day|familyId" → note, e.g. "arriving at 19h"
   const [activity, setActivity] = useState<Activity[]>([]);
 
   const reloadFamilies = useCallback(() => db.loadFamilies().then(setFamilies).catch(() => {}), []);
@@ -60,8 +63,10 @@ export default function App() {
     const n = ++bookingsReq.current;
     return db.loadBookings().then(rows => {
       if (n !== bookingsReq.current) return;
-      setBookings(Object.fromEntries(rows.map(r => [r.day, r.family_id])));
-      setNotes(Object.fromEntries(rows.filter(r => r.note).map(r => [r.day, r.note as string])));
+      const b: Record<string, Record<number, boolean>> = {};
+      for (const r of rows) (b[r.day] ||= {})[r.family_id] = !!r.half;
+      setBookings(b);
+      setNotes(Object.fromEntries(rows.filter(r => r.note).map(r => [r.day + '|' + r.family_id, r.note as string])));
     }).catch(() => {});
   }, []);
   const reloadActivity = useCallback(() => db.loadActivity().then(setActivity).catch(() => {}), []);
@@ -171,40 +176,54 @@ export default function App() {
   const saving = useRef(new Set<string>());
   async function toggle(key: string, fi: number) {
     if (!meFam) return;
-    const owner = bookings[key];
-    const ownerIdx = owner === undefined ? -1 : idxOf(owner);
+    const day = bookings[key] || {};
+    const others = Object.entries(day).filter(([id]) => +id !== meFam.id);
+    const cur: db.DayState = meFam.id in day ? (day[meFam.id] ? 'half' : 'full') : 'free';
     if (fi !== me) {
-      showToast(ownerIdx === fi ? { msg: tr.byOther(fams[fi].name), sub: fmt(key, lang), kind: 'info' } : { msg: tr.onlyEdit(fams[fi].name), sub: tr.switchFam, kind: 'info' });
+      const f = fams[fi];
+      showToast(f.id in day ? { msg: day[f.id] ? tr.halfBy(f.name) : tr.byOther(f.name), sub: fmt(key, lang), kind: 'info' } : { msg: tr.onlyEdit(f.name), sub: tr.switchFam, kind: 'info' });
       return;
     }
-    if (ownerIdx >= 0 && ownerIdx !== me) { showToast({ msg: tr.taken(fams[ownerIdx].name), sub: fmt(key, lang), kind: 'warn' }); return; }
+    // Someone has the whole apartment, or two others share it → nothing left for me.
+    const blocker = others.find(([, half]) => !half) || (others.length > 1 ? others[0] : undefined);
+    if (blocker) { showToast({ msg: tr.taken(fams[idxOf(+blocker[0])]?.name || '?'), sub: fmt(key, lang), kind: 'warn' }); return; }
+    // Each tap: free → whole → half → free. If another family has half: free ⇄ half.
+    const next: db.DayState = cur === 'free' ? (others.length ? 'half' : 'full') : cur === 'full' ? 'half' : 'free';
 
-    setNoteHint(owner === meFam.id ? null : key); // just booked → offer a note right under it
+    setNoteHint(cur === 'free' ? key : null); // just booked → offer a note right under it
     // A day that is still saving ignores further taps (no double-taps).
     if (saving.current.has(key)) return;
     saving.current.add(key);
 
     // Show the change immediately (only this one day), then confirm with the server.
-    const setDay = (v: number | undefined) => setBookings(b => { const n = { ...b }; if (v === undefined) delete n[key]; else n[key] = v; return n; });
-    setDay(owner === meFam.id ? undefined : meFam.id);
-    if (owner === meFam.id) setNotes(ns => { if (!(key in ns)) return ns; const n = { ...ns }; delete n[key]; return n; });
+    const apply = (st: db.DayState) => setBookings(b => {
+      const d = { ...(b[key] || {}) };
+      if (st === 'free') delete d[meFam.id]; else d[meFam.id] = st === 'half';
+      const n = { ...b };
+      if (Object.keys(d).length) n[key] = d; else delete n[key];
+      return n;
+    });
+    apply(next);
+    const noteKey = key + '|' + meFam.id;
+    if (next === 'free') setNotes(ns => { if (!(noteKey in ns)) return ns; const n = { ...ns }; delete n[noteKey]; return n; });
     setPop(key); setTimeout(() => setPop(null), 220);
+    const word = (st: db.DayState) => st === 'free' ? tr.removed : st === 'half' ? tr.halfBooked : tr.fullBooked;
     try {
-      const r = await db.toggleDay(key);
+      const r = await db.setDay(key, next);
       if (r.status === 'taken') {
-        setDay(owner); setNoteHint(null); reloadBookings();
+        apply(cur); setNoteHint(null); reloadBookings();
         const who = fams[idxOf(r.family_id)];
         showToast({ msg: tr.taken(who ? who.name : '?'), sub: fmt(key, lang), kind: 'warn' });
         return;
       }
       showToast({
-        msg: `${fmt(key, lang)} ${tr[r.action]}`, sub: t.liveSub, kind: r.action === 'booked' ? 'ok' : 'neutral',
-        // Undo = tap the day again. Book + release cancel out, so if the
+        msg: `${fmt(key, lang)} ${word(next)}`, sub: next === 'free' ? t.liveSub : tr.halfHint, kind: next === 'free' ? 'neutral' : 'ok',
+        // Undo = put the day back the way it was. Book + release cancel out, so if the
         // notification hasn't gone yet, nobody is told about either.
         undo: async () => {
           setToast(null);
           try {
-            const u = await db.toggleDay(key);
+            const u = await db.setDay(key, cur);
             showToast(u.status === 'ok' ? { msg: tr.undone, sub: fmt(key, lang), kind: 'neutral' } : { msg: tr.offline, sub: fmt(key, lang), kind: 'warn' });
           } catch { showToast({ msg: tr.offline, sub: '', kind: 'warn' }); }
           reloadBookings(); reloadActivity();
@@ -212,7 +231,7 @@ export default function App() {
       });
       reloadActivity();
     } catch {
-      setDay(owner);
+      apply(cur);
       showToast({ msg: tr.offline, sub: fmt(key, lang), kind: 'warn' });
     } finally {
       saving.current.delete(key);
@@ -222,7 +241,8 @@ export default function App() {
   // ── Numbers for the screens ──
   const counts = useMemo(() => {
     const c: Record<number, number> = {};
-    for (const [k, fid] of Object.entries(bookings)) if (k.startsWith(year + '-')) c[fid] = (c[fid] || 0) + 1;
+    for (const [k, day] of Object.entries(bookings)) if (k.startsWith(year + '-'))
+      for (const [fid, half] of Object.entries(day)) c[+fid] = (c[+fid] || 0) + (half ? 0.5 : 1); // half the apartment = ½ day
     return c;
   }, [bookings, year]);
   const countOf = (i: number) => counts[fams[i]?.id] || 0;
@@ -299,21 +319,26 @@ export default function App() {
       {sheetEntry && Sheet(sheetEntry)}
 
       {/* ── Note on a day ── */}
-      {noteDay && (
-        <NoteSheet key={noteDay} t={t} title={fmt(noteDay, lang)} note={notes[noteDay] || ''}
-          owner={bookings[noteDay] === undefined ? null : fams[idxOf(bookings[noteDay])]?.name || ''}
-          ownerColor={bookings[noteDay] === undefined ? '#D6D2C7' : color(idxOf(bookings[noteDay]))}
-          mine={bookings[noteDay] === meFam.id}
+      {noteDay && (() => {
+        // Two families can share a day: show my booking's note if I have one, else the other's.
+        const ids = Object.keys(bookings[noteDay] || {}).map(Number);
+        const ownerId = ids.includes(meFam.id) ? meFam.id : ids[0];
+        return (
+        <NoteSheet key={noteDay} t={t} title={fmt(noteDay, lang)} note={notes[noteDay + '|' + ownerId] || ''}
+          owner={ownerId === undefined ? null : fams[idxOf(ownerId)]?.name || ''}
+          ownerColor={ownerId === undefined ? '#D6D2C7' : color(idxOf(ownerId))}
+          mine={ownerId === meFam.id}
           onClose={() => setNoteDay(null)}
           onSave={async text => {
-            const day = noteDay;
+            const day = noteDay, nk = noteDay + '|' + meFam.id;
             setNoteDay(null);
-            setNotes(ns => { const n = { ...ns }; if (text.trim()) n[day] = text.trim(); else delete n[day]; return n; });
+            setNotes(ns => { const n = { ...ns }; if (text.trim()) n[nk] = text.trim(); else delete n[nk]; return n; });
             try { if ((await db.setDayNote(day, text)) !== 'ok') showToast({ msg: tr.offline, sub: fmt(day, lang), kind: 'warn' }); else showToast({ msg: text.trim() ? t.noteSaved : t.noteRemoved, sub: fmt(day, lang), kind: 'ok' }); }
             catch { showToast({ msg: tr.offline, sub: fmt(day, lang), kind: 'warn' }); }
             reloadBookings();
           }} />
-      )}
+        );
+      })()}
 
       {/* ── "Turn on notifications" ask, shown after login until answered ── */}
       {!sheetEntry && pushChecked && !pushOn && !pushAskHidden && !pushOptedOut() && (db.needsHomeScreen() || (db.pushSupported() && Notification.permission !== 'denied')) && PushAsk()}
@@ -416,7 +441,11 @@ export default function App() {
                 <div key={f.id} style={{ ...grid, marginTop: 2, alignItems: 'center' }}>
                   <div style={{ width: 8, height: 8, borderRadius: '50%', background: color(fi) }} />
                   {days.map(d => (
-                    <div key={d} style={{ height: 9, borderRadius: 2, background: d > n ? 'transparent' : bookings[dayKey(year, m, d)] === f.id ? color(fi) : isWE(year, m, d) ? '#E6E2D8' : '#F1EEE7' }} />
+                    <div key={d} style={{ height: 9, borderRadius: 2, background: (() => {
+                      if (d > n) return 'transparent';
+                      const half = bookings[dayKey(year, m, d)]?.[f.id], empty = isWE(year, m, d) ? '#E6E2D8' : '#F1EEE7';
+                      return half === undefined ? empty : half ? halfBg(color(fi), empty) : color(fi);
+                    })() }} />
                   ))}
                 </div>
               ))}
@@ -434,11 +463,15 @@ export default function App() {
     const rows = [];
     for (let d = 1; d <= n; d++) {
       const key = dayKey(year, month, d);
-      const ownerId = bookings[key];
-      if (ownerId !== undefined) mBooked++;
+      const day = bookings[key] || {};
+      const ids = Object.keys(day).map(Number);
+      if (ids.length) mBooked++;
+      const myNote = notes[key + '|' + meFam!.id];
+      const dayNotes = ids.filter(id => notes[key + '|' + id]);
       const wd = new Date(year, month, d).getDay();
       const we = wd === 0 || wd === 6;
-      const takenByOther = ownerId !== undefined && ownerId !== meFam!.id;
+      // Nothing left for me: someone has the whole apartment, or two others have a half each.
+      const takenByOther = !(meFam!.id in day) && (Object.values(day).some(h => !h) || ids.length > 1);
       rows.push(
         <div key={d} style={{ display: 'grid', gridTemplateColumns: '78px', gridAutoFlow: 'column', gridAutoColumns: 'minmax(0,1fr)', gap: 4, alignItems: 'center', minHeight: 46, padding: '4px 12px', borderTop: wd === 1 && d > 1 ? '2px solid #D6D2C7' : '1px solid #E8E4DB', background: we ? '#EFECE4' : 'transparent', margin: '0 -12px' }}>
           {/* Tap the date to read or write the note for that day */}
@@ -447,14 +480,15 @@ export default function App() {
               <div style={{ font: "700 20px/1 'Barlow Condensed',sans-serif", color: we ? RED : '#111' }}>{d}</div>
               <div style={{ font: "600 11px 'Barlow',sans-serif", color: '#8A877F', textTransform: 'uppercase' }}>{tr.wd[wd]}</div>
             </div>
-            {notes[key]
-              ? <div style={{ font: "600 10px/1.15 'Barlow',sans-serif", color: ownerId !== undefined ? color(idxOf(ownerId)) : '#6B6860', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>✎ {notes[key]}</div>
-              : ownerId === meFam!.id && <div style={{ alignSelf: 'flex-start', font: "700 10px/1 'Barlow',sans-serif", color: color(me), background: '#fff', border: `1.5px solid ${color(me)}`, borderRadius: 6, padding: '2px 5px' }}>{t.addNote}</div>}
+            {dayNotes.map(id => <div key={id} style={{ font: "600 10px/1.15 'Barlow',sans-serif", color: color(idxOf(id)), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>✎ {notes[key + '|' + id]}</div>)}
+            {!myNote && meFam!.id in day && <div style={{ alignSelf: 'flex-start', font: "700 10px/1 'Barlow',sans-serif", color: color(me), background: '#fff', border: `1.5px solid ${color(me)}`, borderRadius: 6, padding: '2px 5px' }}>{t.addNote}</div>}
           </div>
           {fams.map((f, fi) => {
-            const on = ownerId === f.id, mine = fi === me;
+            const on = f.id in day, half = day[f.id], mine = fi === me;
             let bg = we ? '#EAE6DC' : '#F0EDE6', border = '2px solid transparent', label = '', fg = '#fff';
-            if (on) { bg = color(fi); label = mine ? '✓' : ''; }
+            // Half the apartment: the box is split diagonally, half coloured.
+            if (on && half) { bg = halfBg(color(fi), '#fff'); border = `2px solid ${color(fi)}`; }
+            else if (on) { bg = color(fi); label = mine ? '✓' : ''; }
             else if (mine) {
               bg = takenByOther ? 'repeating-linear-gradient(135deg,#E6E2D8 0 4px,#F6F4EF 4px 8px)' : '#fff';
               border = takenByOther ? '2px solid transparent' : `2px dashed ${color(fi)}`;
@@ -466,7 +500,7 @@ export default function App() {
           })}
         </div>
       );
-      if (noteHint === key && ownerId === meFam!.id && !notes[key]) {
+      if (noteHint === key && meFam!.id in day && !myNote) {
         rows.push(
           <div key={'hint' + d} style={{ display: 'grid', gridTemplateColumns: '78px minmax(0,1fr)', gap: 4, padding: '0 12px 8px', background: we ? '#EFECE4' : 'transparent', margin: '0 -12px' }}>
             <div />
