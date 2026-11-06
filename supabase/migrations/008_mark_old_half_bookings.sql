@@ -1,15 +1,18 @@
--- OPTIONAL, after 007. Old bookings whose NOTE says it was half the apartment.
+-- After 007. Team Inserlis wrote "half" in the note instead of booking half
+-- the apartment (there was no option yet). This turns those days into real
+-- half-apartment bookings. Other teams' bookings are not touched.
 --
--- Step A: run ONLY this SELECT first and check the list.
-select b.day, f.name as team, b.note
+-- STEP A: run ONLY this first. It lists every Inserlis booking that has a note,
+-- and says which ones will become "half".
+select b.day,
+       f.name as team,
+       b.note,
+       case when b.note ~* '(half|halb|hälfte|demi|1/2|½)' then 'YES → half' else 'no' end as becomes_half
 from public.bookings b join public.families f on f.id = b.family_id
-where b.note ~* '(half|halb|hälfte|demi|1/2|½)'
+where f.name ilike '%inserli%' and b.note is not null
 order by b.day;
 
--- Step B: if every row in the list really was half the apartment, run this:
+-- STEP B: only once the list in step A is right. Remove the "-- " at the
+-- start of the two lines below, select ONLY those two lines, and click Run.
 -- update public.bookings set half = true
--- where note ~* '(half|halb|hälfte|demi|1/2|½)';
---
--- (Remove the two "-- " at the start of the lines above, then Run.)
--- A row that is wrong can be fixed in the app afterwards: tap the day in
--- your lane until it shows the right state.
+-- where note ~* '(half|halb|hälfte|demi|1/2|½)' and family_id in (select id from public.families where name ilike '%inserli%');
