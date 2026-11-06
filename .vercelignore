@@ -1,0 +1,6 @@
+.env.local
+.env
+vite.mock.config.ts
+node_modules
+dist
+.vapid.tmp

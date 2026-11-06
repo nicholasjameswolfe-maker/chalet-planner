@@ -1,0 +1,16 @@
+html, body, #root { height: 100%; }
+body { margin: 0; background: #E7E4DC; font-family: 'Barlow', system-ui, sans-serif; -webkit-font-smoothing: antialiased; -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
+* { box-sizing: border-box; }
+input { font-family: inherit; }
+a { color: #DA291C; }
+
+/* Hover / focus effects from the design (style-hover / style-focus) */
+.hov-ring:hover { box-shadow: 0 0 0 2px #DA291C !important; }
+.hov-red:hover { border-color: #DA291C !important; color: #DA291C !important; }
+.hov-soft:hover { background: #F6F4EF !important; }
+.hov-dash:hover { background: #FBE9E7 !important; }
+.hov-dark:hover { background: #A81E14 !important; }
+.press:active { transform: scale(.98); }
+.focus-u:focus { text-decoration: underline; }
+.field:focus { border-color: #DA291C !important; background: #fff !important; }
+.tap { cursor: pointer; user-select: none; -webkit-user-select: none; }
